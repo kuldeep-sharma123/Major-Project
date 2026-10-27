@@ -1,0 +1,113 @@
+# ============================================================
+# Next.js Frontend — K8s Deployment and Service
+# ============================================================
+# 2 replicas for HA; no HPA (CPU usage is low for SSR).
+# ============================================================
+
+---
+# ── Deployment ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: ai-testing-agent
+  labels:
+    app: frontend
+    app.kubernetes.io/name:      frontend
+    app.kubernetes.io/component: ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge:       1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: frontend
+        app.kubernetes.io/name:      frontend
+        app.kubernetes.io/component: ui
+    spec:
+      # Spread pods across zones
+      topologySpreadConstraints:
+        - maxSkew:           1
+          topologyKey:       topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: frontend
+
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: frontend
+          image: ghcr.io/your-org/ai-agent-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 3000
+              name: http
+
+          env:
+            # NEXT_PUBLIC_ vars are baked at build time; this is a runtime override
+            # via Next.js runtime config if you use next.config.js publicRuntimeConfig
+            - name: NEXT_PUBLIC_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: ai-agent-config
+                  key: NEXT_PUBLIC_API_URL
+            - name: NODE_ENV
+              value: production
+
+          resources:
+            requests:
+              cpu:    "100m"
+              memory: "256Mi"
+            limits:
+              cpu:    "500m"
+              memory: "512Mi"
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds:       10
+            failureThreshold:    3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds:       20
+            failureThreshold:    3
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+---
+# ── Service ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: ai-testing-agent
+  labels:
+    app: frontend
+    app.kubernetes.io/name:      frontend
+    app.kubernetes.io/component: ui
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - name:       http
+      port:       3000
+      targetPort: 3000
+      protocol:   TCP

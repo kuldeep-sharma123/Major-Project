@@ -1,0 +1,258 @@
+version: "3.9"
+
+# ============================================================
+# AI Autonomous Testing Agent — Docker Compose Stack
+# ============================================================
+# Usage:
+#   cp .env.example .env          # fill in secrets
+#   docker compose up -d          # start all services
+#   docker compose logs -f        # tail logs
+# ============================================================
+
+x-restart-policy: &restart-policy
+  restart: unless-stopped
+
+x-logging: &default-logging
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # ----------------------------------------------------------
+  # PostgreSQL 16 — primary relational database
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai_agent_postgres
+    <<: [*restart-policy, *default-logging]
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-ai_testing_agent}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      # Tune for small container; adjust shared_buffers for production RAM
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Drop SQL init scripts here; they run once on first boot
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"   # bind only on localhost for security
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_testing_agent}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend_net
+
+  # ----------------------------------------------------------
+  # Redis 7 — task queue, caching, WebSocket pub/sub
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ai_agent_redis
+    <<: [*restart-policy, *default-logging]
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfilename "appendonly.aof"
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend_net
+
+  # ----------------------------------------------------------
+  # ChromaDB — vector store for AI embeddings
+  # ----------------------------------------------------------
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: ai_agent_chromadb
+    <<: [*restart-policy, *default-logging]
+    environment:
+      CHROMA_SERVER_HOST: 0.0.0.0
+      CHROMA_SERVER_HTTP_PORT: 8001
+      ANONYMIZED_TELEMETRY: "false"
+      ALLOW_RESET: "true"
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "127.0.0.1:8001:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/api/v1/heartbeat || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - backend_net
+
+  # ----------------------------------------------------------
+  # FastAPI Backend — AI testing orchestration engine
+  # ----------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    image: ai-agent-backend:latest
+    container_name: ai_agent_backend
+    <<: [*restart-policy, *default-logging]
+    env_file:
+      - .env
+    environment:
+      # Override service hostnames to use Docker DNS names
+      DATABASE_URL:  ${DATABASE_URL:-postgresql://postgres:change_me_in_production@postgres:5432/ai_testing_agent}
+      REDIS_URL:     ${REDIS_URL:-redis://redis:6379}
+      CHROMA_HOST:   chromadb
+      CHROMA_PORT:   "8001"
+    volumes:
+      - screenshots_vol:/app/storage/screenshots
+      - videos_vol:/app/storage/videos
+      - logs_vol:/app/storage/logs
+      - reports_vol:/app/storage/reports
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - backend_net
+      - frontend_net
+
+  # ----------------------------------------------------------
+  # Next.js Frontend — test dashboard UI
+  # ----------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: runner
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost/api}
+    image: ai-agent-frontend:latest
+    container_name: ai_agent_frontend
+    <<: [*restart-policy, *default-logging]
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost/api}
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - frontend_net
+
+  # ----------------------------------------------------------
+  # Nginx — reverse proxy & static asset serving
+  # ----------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ai_agent_nginx
+    <<: [*restart-policy, *default-logging]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # Mount TLS certs if you have them (e.g., via Certbot)
+      - nginx_certs:/etc/nginx/certs:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - frontend_net
+
+  # ----------------------------------------------------------
+  # Allure — test report server (port 5050)
+  # ----------------------------------------------------------
+  allure:
+    image: frankescobar/allure-docker-service:latest
+    container_name: ai_agent_allure
+    <<: [*restart-policy, *default-logging]
+    environment:
+      CHECK_RESULTS_EVERY_SECONDS: 3
+      KEEP_HISTORY: "1"
+      KEEP_HISTORY_LATEST: "25"
+    volumes:
+      - allure_results:/app/allure-results
+      - allure_reports:/app/default-reports
+    ports:
+      - "127.0.0.1:5050:5050"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5050 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - frontend_net
+
+# ============================================================
+# Named Volumes
+# ============================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  chroma_data:
+    driver: local
+  screenshots_vol:
+    driver: local
+  videos_vol:
+    driver: local
+  logs_vol:
+    driver: local
+  reports_vol:
+    driver: local
+  allure_results:
+    driver: local
+  allure_reports:
+    driver: local
+  nginx_certs:
+    driver: local
+
+# ============================================================
+# Networks — isolate frontend from direct DB access
+# ============================================================
+networks:
+  backend_net:
+    driver: bridge
+    internal: false      # postgres/redis/chroma accessible only on this net
+  frontend_net:
+    driver: bridge

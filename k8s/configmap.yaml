@@ -1,0 +1,55 @@
+# ============================================================
+# Kubernetes ConfigMap — Non-secret environment variables
+# ============================================================
+# Apply: kubectl apply -f k8s/configmap.yaml -n ai-testing-agent
+# ============================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-config
+  namespace: ai-testing-agent
+  labels:
+    app: ai-testing-agent
+    app.kubernetes.io/name:      ai-agent-config
+    app.kubernetes.io/component: config
+
+data:
+  # ── Database ───────────────────────────────────────────────
+  POSTGRES_DB:   "ai_testing_agent"
+
+  # ── AI Provider ────────────────────────────────────────────
+  AI_PROVIDER:   "openai"
+  OPENAI_MODEL:  "gpt-4o"
+
+  # ── Frontend ───────────────────────────────────────────────
+  # Update to your actual domain after ingress is provisioned
+  NEXT_PUBLIC_API_URL: "https://your-domain.com/api"
+
+  # ── CORS ───────────────────────────────────────────────────
+  CORS_ORIGINS: "https://your-domain.com"
+
+  # ── ChromaDB ───────────────────────────────────────────────
+  CHROMA_HOST: "chromadb"
+  CHROMA_PORT: "8001"
+
+  # ── File Storage Paths ─────────────────────────────────────
+  SCREENSHOTS_DIR: "/app/storage/screenshots"
+  VIDEOS_DIR:      "/app/storage/videos"
+  LOGS_DIR:        "/app/storage/logs"
+  REPORTS_DIR:     "/app/storage/reports"
+
+  # ── Playwright ─────────────────────────────────────────────
+  PLAYWRIGHT_HEADLESS: "true"
+  PLAYWRIGHT_TIMEOUT:  "30000"
+
+  # ── Logging ────────────────────────────────────────────────
+  LOG_LEVEL:   "INFO"
+  ENVIRONMENT: "production"
+  DEBUG:       "false"
+
+  # ── JWT ────────────────────────────────────────────────────
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+
+  # ── Allure ─────────────────────────────────────────────────
+  ALLURE_RESULTS_DIR: "/app/storage/reports/allure-results"

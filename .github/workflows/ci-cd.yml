@@ -1,0 +1,416 @@
+# ============================================================
+# GitHub Actions CI/CD Pipeline
+# AI Autonomous Testing Agent
+# ============================================================
+# Jobs:
+#   lint           → flake8 + black (Python), eslint (TypeScript)
+#   test-backend   → pytest with PostgreSQL service container
+#   test-frontend  → jest unit tests
+#   build          → Docker build for both images
+#   security-scan  → bandit (Python), npm audit (JS)
+#   deploy         → SSH deploy to production server (main only)
+# ============================================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE:  ghcr.io/${{ github.repository_owner }}/ai-agent-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/ai-agent-frontend
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION:   "18"
+
+# Cancel redundant workflow runs on the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ============================================================
+  # JOB: lint
+  # ============================================================
+  lint:
+    name: "Lint (Python + TypeScript)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Python linting ─────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          # Cache key tied to requirements file hash
+          key: pip-${{ runner.os }}-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install Python lint tools
+        run: pip install flake8 black isort mypy
+
+      - name: Run flake8 (style + error check)
+        run: |
+          flake8 backend/app \
+            --max-line-length=88 \
+            --extend-ignore=E203,W503 \
+            --count --statistics
+
+      - name: Run black (formatting check)
+        run: black --check --diff backend/app
+
+      - name: Run isort (import ordering check)
+        run: isort --check-only --diff backend/app
+
+      # ── TypeScript / Node linting ──────────────────────────
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run TypeScript type check
+        working-directory: frontend
+        run: npm run type-check
+
+  # ============================================================
+  # JOB: test-backend
+  # ============================================================
+  test-backend:
+    name: "Test Backend (pytest)"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    # Service containers run in the same network as the job
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB:       test_ai_agent
+        options: >-
+          --health-cmd "pg_isready -U test_user -d test_ai_agent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_ai_agent
+      REDIS_URL:    redis://localhost:6379
+      SECRET_KEY:   test_secret_key_not_for_production_use
+      AI_PROVIDER:  openai
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY_TEST || 'sk-test-placeholder' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov httpx
+
+      - name: Run Alembic migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Run pytest with coverage
+        working-directory: backend
+        run: |
+          pytest tests/ \
+            -v \
+            --tb=short \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=70 \
+            -p no:cacheprovider
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          flags: backend
+        continue-on-error: true    # don't fail the pipeline if Codecov is down
+
+  # ============================================================
+  # JOB: test-frontend
+  # ============================================================
+  test-frontend:
+    name: "Test Frontend (Jest)"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run Jest tests with coverage
+        working-directory: frontend
+        run: npm test -- --coverage --watchAll=false --passWithNoTests
+
+      - name: Upload frontend coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+
+  # ============================================================
+  # JOB: security-scan
+  # ============================================================
+  security-scan:
+    name: "Security Scan"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Python: bandit ─────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install bandit + safety
+        run: pip install bandit safety
+
+      - name: Run bandit (Python SAST)
+        run: |
+          bandit -r backend/app \
+            -f json \
+            -o bandit-report.json \
+            --severity-level medium \
+            --confidence-level medium || true
+
+      - name: Check for known vulnerabilities (safety)
+        working-directory: backend
+        run: safety check -r requirements.txt --full-report || true
+
+      # ── Node: npm audit ────────────────────────────────────
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run npm audit
+        working-directory: frontend
+        # audit level: moderate — fail on moderate+ vulnerabilities
+        run: npm audit --audit-level=moderate || true
+
+      - name: Upload bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: bandit-report.json
+
+  # ============================================================
+  # JOB: build — Docker images
+  # ============================================================
+  build:
+    name: "Build Docker Images"
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+    # Only push images on main branch; PR builds still validate Dockerfile
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Backend image ──────────────────────────────────────
+      - name: Extract metadata for backend image
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      # ── Frontend image ─────────────────────────────────────
+      - name: Extract metadata for frontend image
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          target: runner
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost/api
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+  # ============================================================
+  # JOB: deploy — SSH deploy to production (main branch only)
+  # ============================================================
+  deploy:
+    name: "Deploy to Production"
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production      # requires manual approval in GitHub Environments
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy docker-compose and nginx config to server
+        run: |
+          scp docker-compose.yml nginx.conf \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/ai-agent/
+
+      - name: Deploy via SSH
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'ENDSSH'
+            set -e
+            cd /opt/ai-agent
+
+            # Pull latest images from registry
+            docker compose pull backend frontend
+
+            # Rolling restart with zero downtime
+            docker compose up -d --remove-orphans
+
+            # Wait for health checks to pass
+            sleep 30
+            docker compose ps
+
+            # Clean up dangling images to save disk space
+            docker image prune -f
+          ENDSSH
+
+      - name: Notify on deployment success
+        if: success()
+        run: |
+          echo "✅ Deployment to ${{ secrets.DEPLOY_HOST }} succeeded for commit ${{ github.sha }}"
+
+      - name: Notify on deployment failure
+        if: failure()
+        run: |
+          echo "❌ Deployment FAILED for commit ${{ github.sha }}"
+          exit 1

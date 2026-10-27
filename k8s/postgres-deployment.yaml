@@ -1,0 +1,156 @@
+# ============================================================
+# PostgreSQL — Kubernetes Deployment, Service, and PVC
+# ============================================================
+# Uses a StatefulSet-style PVC for durable storage.
+# In production prefer a managed DB (RDS, Cloud SQL) over
+# running Postgres in K8s.
+# ============================================================
+
+---
+# ── PersistentVolumeClaim ────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: ai-testing-agent
+  labels:
+    app: postgres
+    app.kubernetes.io/name:      postgres
+    app.kubernetes.io/component: database
+spec:
+  accessModes:
+    - ReadWriteOnce         # single-node write (standard for RDBMS)
+  resources:
+    requests:
+      storage: 20Gi
+  # Use your cloud provider's storage class (e.g. gp3 on AWS EKS)
+  # storageClassName: gp3
+
+---
+# ── Deployment ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ai-testing-agent
+  labels:
+    app: postgres
+    app.kubernetes.io/name:      postgres
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1               # Postgres is stateful; use 1 replica with a PVC
+  selector:
+    matchLabels:
+      app: postgres
+  # Recreate strategy — stops old pod before starting new one
+  # (prevents write conflicts on the PVC)
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/name:      postgres
+        app.kubernetes.io/component: database
+    spec:
+      # Prefer scheduling on nodes with an SSD storage label
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 1
+              preference:
+                matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values: [m5.xlarge, m5.2xlarge]
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: ai-agent-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ai-agent-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ai-agent-secrets
+                  key: POSTGRES_PASSWORD
+            # Tuning for a 2Gi memory container
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+
+          resources:
+            requests:
+              cpu:    "250m"
+              memory: "512Mi"
+            limits:
+              cpu:    "1000m"
+              memory: "2Gi"
+
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 15
+            periodSeconds:       10
+            failureThreshold:    5
+
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - $(POSTGRES_DB)
+            initialDelaySeconds: 30
+            periodSeconds:       20
+            failureThreshold:    3
+
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+# ── Service ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ai-testing-agent
+  labels:
+    app: postgres
+    app.kubernetes.io/name:      postgres
+    app.kubernetes.io/component: database
+spec:
+  # ClusterIP — not exposed outside the cluster
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name:       postgres
+      port:       5432
+      targetPort: 5432
+      protocol:   TCP

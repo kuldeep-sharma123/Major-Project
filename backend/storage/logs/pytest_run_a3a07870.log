@@ -1,0 +1,17 @@
+STDOUT:
+============================= test session starts =============================
+platform win32 -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\Kuldeep.5.Sharma\AppData\Local\Programs\Python\Python314\python.exe
+cachedir: .pytest_cache
+metadata: {'Python': '3.14.7', 'Platform': 'Windows-11-10.0.26200-SP0', 'Packages': {'pytest': '9.1.1', 'pluggy': '1.6.0'}, 'Plugins': {'allure-pytest': '2.16.2', 'anyio': '4.15.1', 'langsmith': '0.14.4', 'asyncio': '1.4.0', 'base-url': '2.1.0', 'html': '4.2.0', 'metadata': '3.1.1', 'playwright': '0.9.0'}, 'JAVA_HOME': 'C:\\Program Files\\jdk-21', 'Base URL': ''}
+rootdir: D:\clg prject\backend\playwright_framework
+configfile: pytest.ini
+plugins: allure-pytest-2.16.2, anyio-4.15.1, langsmith-0.14.4, asyncio-1.4.0, base-url-2.1.0, html-4.2.0, metadata-3.1.1, playwright-0.9.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 0 items
+
+============================ no tests ran in 0.01s ============================
+
+
+STDERR:
+ERROR: file or directory not found: playwright_framework\tests\test_general.py
+

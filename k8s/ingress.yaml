@@ -1,0 +1,110 @@
+# ============================================================
+# Nginx Ingress — AI Autonomous Testing Agent
+# ============================================================
+# Prerequisites:
+#   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/\
+#     controller-v1.10.0/deploy/static/provider/cloud/deploy.yaml
+#
+# Routes:
+#   /          → frontend:3000
+#   /api/      → backend:8000
+#   /ws/       → backend:8000  (WebSocket)
+#   /allure/   → allure:5050
+# ============================================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-agent-ingress
+  namespace: ai-testing-agent
+  labels:
+    app: ai-testing-agent
+    app.kubernetes.io/name:      ai-agent-ingress
+    app.kubernetes.io/component: ingress
+  annotations:
+    # Ingress class
+    kubernetes.io/ingress.class: nginx
+
+    # ── SSL / TLS ──────────────────────────────────────────
+    # cert-manager will issue a Let's Encrypt cert for the host
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # ── Request size ──────────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+    # ── Timeouts (extended for AI inference calls) ─────────
+    nginx.ingress.kubernetes.io/proxy-read-timeout:    "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout:    "120"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+
+    # ── WebSocket support ─────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+    # ── Gzip ─────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/enable-gzip: "true"
+
+    # ── Rate limiting ─────────────────────────────────────
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+
+    # ── Security headers ──────────────────────────────────
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ── Rewrite rules ─────────────────────────────────────
+    # Strip /api prefix before passing to backend
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+
+spec:
+  # TLS — cert-manager automatically provisions the certificate
+  tls:
+    - hosts:
+        - your-domain.com        # ← replace with your actual domain
+      secretName: ai-agent-tls
+
+  rules:
+    - host: your-domain.com      # ← replace with your actual domain
+      http:
+        paths:
+
+          # ── Frontend ──────────────────────────────────────
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+
+          # ── REST API ──────────────────────────────────────
+          # Captures /api/<anything> and rewrites to /<anything>
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+
+          # ── WebSocket ─────────────────────────────────────
+          - path: /ws/
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+
+          # ── Allure Reports ────────────────────────────────
+          - path: /allure/
+            pathType: Prefix
+            backend:
+              service:
+                name: allure
+                port:
+                  number: 5050

@@ -1,0 +1,19 @@
+# ============================================================
+# Kubernetes Namespace — AI Autonomous Testing Agent
+# ============================================================
+# All resources for the application live in this namespace,
+# providing isolation from other workloads in the cluster.
+# ============================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-testing-agent
+  labels:
+    app.kubernetes.io/name:       ai-testing-agent
+    app.kubernetes.io/managed-by: kubectl
+    environment:                  production
+  annotations:
+    # Resource quotas enforce limits per namespace
+    # kubectl apply -f resourcequota.yaml -n ai-testing-agent
+    description: "AI Autonomous Testing Agent application namespace"

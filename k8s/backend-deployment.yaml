@@ -1,0 +1,195 @@
+# ============================================================
+# FastAPI Backend — K8s Deployment, Service, and HPA
+# ============================================================
+# 3 replicas by default; HPA scales between 2 and 10 based on CPU.
+# ============================================================
+
+---
+# ── Deployment ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: ai-testing-agent
+  labels:
+    app: backend
+    app.kubernetes.io/name:      backend
+    app.kubernetes.io/component: api
+  annotations:
+    # Trigger rolling restarts when ConfigMap changes
+    configmap.reloader.stakater.com/reload: "ai-agent-config"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge:       1    # create 1 extra pod during update
+      maxUnavailable: 0    # keep all replicas available during rollout
+  template:
+    metadata:
+      labels:
+        app: backend
+        app.kubernetes.io/name:      backend
+        app.kubernetes.io/component: api
+      annotations:
+        # Prometheus scrape annotations
+        prometheus.io/scrape: "true"
+        prometheus.io/path:   "/metrics"
+        prometheus.io/port:   "8000"
+    spec:
+      # Spread pods across availability zones for HA
+      topologySpreadConstraints:
+        - maxSkew:           1
+          topologyKey:       topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: backend
+
+      # Graceful shutdown: allow in-flight requests to complete
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: backend
+          image: ghcr.io/your-org/ai-agent-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+
+          envFrom:
+            - configMapRef:
+                name: ai-agent-config
+            - secretRef:
+                name: ai-agent-secrets
+
+          env:
+            # Override DATABASE_URL to use K8s service DNS name
+            - name: DATABASE_URL
+              value: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+
+          volumeMounts:
+            - name: screenshots
+              mountPath: /app/storage/screenshots
+            - name: videos
+              mountPath: /app/storage/videos
+            - name: logs
+              mountPath: /app/storage/logs
+            - name: reports
+              mountPath: /app/storage/reports
+
+          resources:
+            requests:
+              cpu:    "250m"
+              memory: "512Mi"
+            limits:
+              cpu:    "2000m"
+              memory: "2Gi"
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds:       10
+            failureThreshold:    3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 40
+            periodSeconds:       20
+            failureThreshold:    3
+
+          # Allow uvicorn workers to finish processing before SIGKILL
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+
+      volumes:
+        # Use PVCs (or cloud file storage) for artifact persistence
+        - name: screenshots
+          emptyDir: {}      # replace with PVC for persistence
+        - name: videos
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: reports
+          emptyDir: {}
+
+---
+# ── Service ──────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: ai-testing-agent
+  labels:
+    app: backend
+    app.kubernetes.io/name:      backend
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name:       http
+      port:       8000
+      targetPort: 8000
+      protocol:   TCP
+
+---
+# ── HorizontalPodAutoscaler ───────────────────────────────────
+# Scales backend pods between 2 and 10 replicas based on CPU utilisation.
+# Requires metrics-server to be installed in the cluster.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: ai-testing-agent
+  labels:
+    app: backend
+    app.kubernetes.io/name:      backend
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind:       Deployment
+    name:       backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # Scale up when average CPU exceeds 70%
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type:               Utilization
+          averageUtilization: 70
+    # Scale up when average memory exceeds 80%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type:               Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60     # wait 60s before scaling up again
+      policies:
+        - type:          Pods
+          value:         2               # add at most 2 pods at a time
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300    # wait 5 min before scaling down
+      policies:
+        - type:          Pods
+          value:         1               # remove at most 1 pod at a time
+          periodSeconds: 120

@@ -1,0 +1,8 @@
+STDOUT:
+
+
+STDERR:
+ImportError while loading conftest 'D:\clg prject\backend\playwright_framework\conftest.py'.
+conftest.py:6: in <module>
+    import allure
+E   ModuleNotFoundError: No module named 'allure'

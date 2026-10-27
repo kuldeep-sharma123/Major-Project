@@ -1,0 +1,32 @@
+{
+  "valid_credentials": {
+    "username": "Admin",
+    "password": "admin123",
+    "email": "admin@example.com"
+  },
+  "invalid_credentials": [
+    { "username": "wrong_user", "password": "wrong_password" },
+    { "username": "", "password": "missing_username" },
+    { "username": "admin", "password": "" },
+    { "username": "   ", "password": "   " }
+  ],
+  "sql_injection_payloads": [
+    "' OR '1'='1",
+    "' OR '1'='1' --",
+    "admin' --",
+    "'; DROP TABLE users;--"
+  ],
+  "xss_payloads": [
+    "<script>alert('XSS')</script>",
+    "<img src=x onerror=alert(1)>",
+    "javascript:alert(1)"
+  ],
+  "boundary_values": {
+    "min_length": "",
+    "one_char": "a",
+    "numeric_only": "123456789",
+    "special_characters": "!@#$%^&*()_+",
+    "long_string": "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam."
+  }
+}
+
